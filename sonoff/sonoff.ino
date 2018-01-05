@@ -111,6 +111,7 @@ byte serial_in_byte;                        // Received byte
 int serial_in_byte_counter = 0;             // Index in receive buffer
 byte dual_hex_code = 0;                     // Sonoff dual input flag
 uint16_t dual_button_code = 0;              // Sonoff dual received code
+uint8_t last_dual_relay_state = 0;
 int16_t save_data_counter;                  // Counter and flag for config save to Flash
 uint8_t mqtt_retry_counter = 0;             // MQTT connection retry counter
 uint8_t fallback_topic_flag = 0;            // Use Topic or FallbackTopic
@@ -312,6 +313,9 @@ void SetDevicePower(power_t rpower)
     Serial.write(0xA1);
     Serial.write('\n');
     Serial.flush();
+    if(!interlock_mutex){
+      last_dual_relay_state = rpower;
+    }
   }
   else if (EXS_RELAY == Settings.module) {
     SetLatchingRelay(rpower, 1);
@@ -1919,16 +1923,16 @@ void ButtonHandler()
     button = NOT_PRESSED;
     button_present = 0;
 
-    if (!i && ((SONOFF_DUAL == Settings.module) || (CH4 == Settings.module))) {
+    if (i<2 && ((SONOFF_DUAL == Settings.module) || (CH4 == Settings.module))) {
       button_present = 1;
-      if (dual_button_code) {
+      uint8_t mask = ((dual_button_code & 0xff) ^ last_dual_relay_state); //Which relay has changed (which button was pressed).
+      if (((1<<i) & mask)>0 && dual_button_code>0){
         snprintf_P(log_data, sizeof(log_data), PSTR(D_LOG_APPLICATION D_BUTTON " " D_CODE " %04X"), dual_button_code);
         AddLog(LOG_LEVEL_DEBUG);
         button = PRESSED;
         if (0xF500 == dual_button_code) {                     // Button hold
           holdbutton[i] = (Settings.param[P_HOLD_TIME] * (STATES / 10)) -1;
         }
-        dual_button_code = 0;
       }
     } else {
       if ((pin[GPIO_KEY1 +i] < 99) && !blockgpio0) {
@@ -1937,6 +1941,10 @@ void ButtonHandler()
       }
     }
 
+    if(i==(maxdev-1) && (dual_button_code > 0)){
+      last_dual_relay_state = dual_button_code & 0xFF;
+      dual_button_code = 0;
+    }
     if (button_present) {
       if (SONOFF_4CHPRO == Settings.module) {
         if (holdbutton[i]) {
