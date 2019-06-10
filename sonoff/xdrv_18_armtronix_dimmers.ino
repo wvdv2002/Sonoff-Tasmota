@@ -31,10 +31,12 @@
 
 TasmotaSerial *ArmtronixSerial = nullptr;
 
-bool armtronix_ignore_dim = false;            // Flag to skip serial send to prevent looping when processing inbound states from the faceplate interaction
+//bool armtronix_ignore_dim = false;            // Flag to skip serial send to prevent looping when processing inbound states from the faceplate interaction
 int8_t armtronix_wifi_state = -2;                // Keep MCU wifi-status in sync with WifiState()
-int8_t armtronix_dimState[2];                    // Dimmer state values.
-int8_t armtronix_knobState[2];                   // Dimmer state values.
+//int8_t armtronix_dimState[2];                    // Dimmer state values.
+int8_t armtronix_oldKnobState[2];                   // Dimmer state values.
+const int8_t ARMTRONIX_KNOBVARIATIONBEFORECHANGE = 5;        //The amount the knob needs to change before the change is applied.
+bool armtronix_firstStatus = true;
 
 /*********************************************************************************************\
  * Internal Functions
@@ -48,22 +50,17 @@ bool ArmtronixSetChannels(void)
 
 void LightSerial2Duty(uint8_t duty1, uint8_t duty2)
 {
-  if (ArmtronixSerial && !armtronix_ignore_dim) {
-    duty1 = ((float)duty1)/2.575757; //max 99
-    duty2 = ((float)duty2)/2.575757; //max 99
-    armtronix_dimState[0] = duty1;
-    armtronix_dimState[1] = duty2;
-    ArmtronixSerial->print("Dimmer1:");
-    ArmtronixSerial->print(duty1);
-    ArmtronixSerial->print("\nDimmer2:");
+  if (ArmtronixSerial) {
+    duty1 = changeUIntScale(duty1,0,255,0,100); //max 100
+    duty2 = changeUIntScale(duty2,0,255,0,100); //max 100
+//    armtronix_dimState[0] = duty1;
+//    armtronix_dimState[1] = duty2;
+    ArmtronixSerial->print("DIMMER:1,");
+    ArmtronixSerial->println(duty1);
+    ArmtronixSerial->print("DIMMER:2,");
     ArmtronixSerial->println(duty2);
 
-    AddLog_P2(LOG_LEVEL_DEBUG, PSTR("ARM: Send Serial Packet Dim Values=%d,%d"), armtronix_dimState[0],armtronix_dimState[1]);
-
-  } else {
-    armtronix_ignore_dim = false;
-    AddLog_P2(LOG_LEVEL_DEBUG, PSTR("ARM: Send Dim Level skipped due to already set. Value=%d,%d"), armtronix_dimState[0],armtronix_dimState[1]);
-
+    AddLog_P2(LOG_LEVEL_DEBUG, PSTR("ARM: Send Serial Packet Dim Values=%d,%d"), duty1,duty2);
   }
 }
 
@@ -71,9 +68,8 @@ void ArmtronixRequestState(void)
 {
   if (ArmtronixSerial) {
     // Get current status of MCU
-    AddLog_P(LOG_LEVEL_DEBUG, PSTR("ARM: Request MCU state"));
-    ArmtronixSerial->println("Status");
-
+    AddLog_P(LOG_LEVEL_DEBUG, PSTR("ARM: Request Dimmer state"));
+    ArmtronixSerial->println("STATUS:");
   }
 }
 
@@ -83,50 +79,80 @@ void ArmtronixRequestState(void)
 
 bool ArmtronixModuleSelected(void)
 {
-  light_type = LT_SERIAL2;
+  String answer;
+ light_type=LT_SERIAL2;
+  ArmtronixSerial = new TasmotaSerial(pin[GPIO_RXD], pin[GPIO_TXD], 2);
+  if (ArmtronixSerial->begin(115200)) {
+    if (ArmtronixSerial->hardwareSerial()) { ClaimSerial(); }
+     ArmtronixSerial->println("DIMCOUNT:"); 
+    int i=0;
+    while (!ArmtronixSerial->available()){
+        yield();
+        delay(10);
+        if(i++>100){break;}
+    }
+    answer = ArmtronixSerial->readStringUntil('\n');
+    if (answer.substring(0,7) == "DIMCOUNT:") {
+      int temp = answer.substring(7,8).toInt();
+      if(temp==1){
+        light_type = LT_SERIAL1;
+      }
+    }
+  }
   return true;
 }
 
 void ArmtronixInit(void)
 {
-  armtronix_dimState[0] = -1;
-  armtronix_dimState[1] = -1;
-  armtronix_knobState[0] = -1;
-  armtronix_knobState[1] = -1;
-  ArmtronixSerial = new TasmotaSerial(pin[GPIO_RXD], pin[GPIO_TXD], 2);
-  if (ArmtronixSerial->begin(115200)) {
-    if (ArmtronixSerial->hardwareSerial()) { ClaimSerial(); }
-    ArmtronixSerial->println("Status");
-  }
+    ArmtronixSerial->println("STATUS:");
 }
 
 void ArmtronixSerialInput(void)
 {
   String answer;
-  int8_t newDimState[2];
+  uint8_t newDimState[2];
+  uint8_t newKnobState[2]; 
   uint8_t temp;
   int commaIndex;
   char scmnd[20];
   if (ArmtronixSerial->available()) {
     yield();
     answer = ArmtronixSerial->readStringUntil('\n');
-    if (answer.substring(0,7) == "Status:") {
+    if (answer.substring(0,7) == "STATUS:") {
       commaIndex = 6;
       for (int i =0; i<2; i++) {
         newDimState[i] = answer.substring(commaIndex+1,answer.indexOf(',',commaIndex+1)).toInt();
-        if (newDimState[i] != armtronix_dimState[i]) {
-          temp = ((float)newDimState[i])*1.01010101010101; //max 255
-          armtronix_dimState[i] = newDimState[i];
-          armtronix_ignore_dim = true;
-          snprintf_P(scmnd, sizeof(scmnd), PSTR(D_CMND_CHANNEL "%d %d"),i+1, temp);
-          ExecuteCommand(scmnd,SRC_SWITCH);
-          AddLog_P2(LOG_LEVEL_DEBUG, PSTR("ARM: Send CMND_CHANNEL=%s"), scmnd );
-        }
-        commaIndex = answer.indexOf(',',commaIndex+1);
+ //       newDimState[i] = changeUIntScale(newDimState[i], 0, 100, 0, 255);
+//          temp = ((float)newDimState[i]); //max 255
+//          snprintf_P(scmnd, sizeof(scmnd), PSTR(D_CMND_CHANNEL "%d %d"),i+1, temp);
+//          ExecuteCommand(scmnd,SRC_SWITCH);
+//          AddLog_P2(LOG_LEVEL_DEBUG, PSTR("ARM: Send CMND_CHANNEL=%s"), scmnd );
+          commaIndex = answer.indexOf(',',commaIndex+1);
+          int temp = answer.substring(commaIndex+1,answer.indexOf(',',commaIndex+1)).toInt();
+          temp = changeUIntScale(temp,0,512,0,100);
+          newKnobState[i] = min(temp,100);
+          commaIndex = answer.indexOf(',',commaIndex+1);
       }
-      armtronix_knobState[0] = answer.substring(commaIndex+1,answer.indexOf(',',commaIndex+1)).toInt();
-      commaIndex = answer.indexOf(',',commaIndex+1);
-      armtronix_knobState[1] = answer.substring(commaIndex+1,answer.indexOf(',',commaIndex+1)).toInt();
+          AddLog_P2(LOG_LEVEL_DEBUG_MORE, PSTR("ARM: Received Status: %u, %u, %u, %u"), newDimState[0],newKnobState[0],newDimState[1],newKnobState[1]);
+      if(armtronix_firstStatus){
+        armtronix_firstStatus = false;
+        armtronix_oldKnobState[0] = newKnobState[0];
+        armtronix_oldKnobState[1] = newKnobState[1];
+           AddLog_P2(LOG_LEVEL_DEBUG_MORE, PSTR("ARM: First knob setting"));
+      }else{
+        if(abs((int8_t)(armtronix_oldKnobState[0] - newKnobState[0]))>ARMTRONIX_KNOBVARIATIONBEFORECHANGE){
+        armtronix_oldKnobState[0] = newKnobState[0];
+           AddLog_P2(LOG_LEVEL_DEBUG_MORE, PSTR("ARM: Change detected in Chan1"));
+          snprintf_P(scmnd, sizeof(scmnd), PSTR(D_CMND_CHANNEL "%u %u"),1, newKnobState[0]);
+          ExecuteCommand(scmnd, SRC_BUTTON);
+        }
+        if(abs((int8_t)(armtronix_oldKnobState[1] - newKnobState[1]))>ARMTRONIX_KNOBVARIATIONBEFORECHANGE){
+        armtronix_oldKnobState[1] = newKnobState[1];
+          AddLog_P2(LOG_LEVEL_DEBUG_MORE, PSTR("ARM: Change detected in Chan2"));
+          snprintf_P(scmnd, sizeof(scmnd), PSTR(D_CMND_CHANNEL "%u %u"),2, newKnobState[1]);
+          ExecuteCommand(scmnd, SRC_BUTTON);
+        }
+      }   
     }
   }
 }
@@ -151,7 +177,7 @@ void ArmtronixSetWifiLed(void)
   AddLog_P2(LOG_LEVEL_DEBUG, PSTR("ARM: Set WiFi LED to state %d (%d)"), wifi_state, WifiState());
 
   char state = '0' + ((wifi_state & 1) > 0);
-  ArmtronixSerial->print("Setled:");
+  ArmtronixSerial->print("SETLEDS:");
   ArmtronixSerial->write(state);
   ArmtronixSerial->write(',');
   state = '0' + ((wifi_state & 2) > 0);
@@ -182,9 +208,7 @@ bool Xdrv18(uint8_t function)
       case FUNC_EVERY_SECOND:
         if (ArmtronixSerial) {
           if (armtronix_wifi_state!=WifiState()) { ArmtronixSetWifiLed(); }
-          if (uptime &1) {
-            ArmtronixSerial->println("Status");
-          }
+          ArmtronixSerial->println("STATUS:");
         }
         break;
       case FUNC_SET_CHANNELS:
